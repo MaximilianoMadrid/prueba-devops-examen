@@ -1,0 +1,12 @@
+# Ignore local dependencies
+frontend-dashboard/node_modules/
+**/node_modules/
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore npm debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

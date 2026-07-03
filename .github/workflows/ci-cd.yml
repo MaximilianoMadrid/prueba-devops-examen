@@ -1,0 +1,127 @@
+name: CI/CD - SmartLogix (auth, orders, gateway)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'proyecto/microservicios/ms-auth/**'
+      - 'proyecto/microservicios/ms-orders/**'
+      - 'proyecto/api-gateway/**'
+      - 'proyecto/docker-compose.yml'
+      - '.github/workflows/ci-cd.yml'
+  workflow_dispatch: {}
+
+env:
+  DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+  IMAGE_TAG: ${{ github.sha }}
+  AWS_REGION: us-east-1
+
+jobs:
+
+  # ---------- BUILD & TEST ----------
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [ms-auth, ms-orders, api-gateway]
+        include:
+          - service: ms-auth
+            path: proyecto/microservicios/ms-auth
+          - service: ms-orders
+            path: proyecto/microservicios/ms-orders
+          - service: api-gateway
+            path: proyecto/api-gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build y test - ${{ matrix.service }}
+        working-directory: ${{ matrix.path }}
+        run: mvn -B clean verify
+
+  # ---------- IMAGES: build + push a Docker Hub ----------
+  build-push-images:
+    needs: build-test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: ms-auth
+            path: proyecto/microservicios/ms-auth
+          - service: ms-orders
+            path: proyecto/microservicios/ms-orders
+          - service: api-gateway
+            path: proyecto/api-gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build y push imagen - ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.path }}
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service }}:${{ env.IMAGE_TAG }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service }}:latest
+
+  # ---------- PROVISIÓN DE RECURSOS CLOUD (IaC vía AWS CLI) ----------
+  provision-cloud:
+    needs: build-push-images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS Academy
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Crear/asegurar cola SQS smartlogix-orders-queue
+        run: |
+          chmod +x proyecto/scripts/provision-sqs.sh
+          ./proyecto/scripts/provision-sqs.sh
+
+  # ---------- DEPLOY: docker stack deploy en el manager de Swarm (EC2) ----------
+  deploy-swarm:
+    needs: provision-cloud
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copiar docker-compose.yml al manager Swarm
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SWARM_MANAGER_HOST }}
+          username: ${{ secrets.SWARM_MANAGER_USER }}
+          key: ${{ secrets.SWARM_MANAGER_SSH_KEY }}
+          source: "proyecto/docker-compose.yml"
+          target: "~/smartlogix/"
+          strip_components: 1
+
+      - name: Ejecutar docker stack deploy vía SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SWARM_MANAGER_HOST }}
+          username: ${{ secrets.SWARM_MANAGER_USER }}
+          key: ${{ secrets.SWARM_MANAGER_SSH_KEY }}
+          script: |
+            cd ~/smartlogix
+            export DOCKERHUB_USER=${{ secrets.DOCKERHUB_USERNAME }}
+            export IMAGE_TAG=${{ env.IMAGE_TAG }}
+            docker stack deploy -c docker-compose.yml smartlogix --with-registry-auth
+            docker stack services smartlogix

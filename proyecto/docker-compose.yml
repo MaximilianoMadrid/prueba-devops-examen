@@ -1,0 +1,130 @@
+version: "3.9"
+
+# SmartLogix - Orquestación de microservicios (compatible con Docker Swarm)
+# Uso local:  docker compose up --build
+# Uso Swarm:  docker stack deploy -c docker-compose.yml smartlogix
+
+services:
+
+  db-auth:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: auth_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "1234"
+    volumes:
+      - db_auth_data:/var/lib/postgresql/data
+    networks:
+      - smartlogix-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  db-orders:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orders_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "1234"
+    volumes:
+      - db_orders_data:/var/lib/postgresql/data
+    networks:
+      - smartlogix-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  ms-auth:
+    image: ${DOCKERHUB_USER:-smartlogix}/ms-auth:${IMAGE_TAG:-latest}
+    build:
+      context: ./microservicios/ms-auth
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db-auth:5432/auth_db
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: "1234"
+    depends_on:
+      db-auth:
+        condition: service_healthy
+    networks:
+      - smartlogix-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep UP || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  ms-orders:
+    image: ${DOCKERHUB_USER:-smartlogix}/ms-orders:${IMAGE_TAG:-latest}
+    build:
+      context: ./microservicios/ms-orders
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db-orders:5432/orders_db
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: "1234"
+    depends_on:
+      db-orders:
+        condition: service_healthy
+    networks:
+      - smartlogix-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/actuator/health | grep UP || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  api-gateway:
+    image: ${DOCKERHUB_USER:-smartlogix}/api-gateway:${IMAGE_TAG:-latest}
+    build:
+      context: ./api-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      ms-auth:
+        condition: service_healthy
+      ms-orders:
+        condition: service_healthy
+    networks:
+      - smartlogix-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+networks:
+  smartlogix-net:
+    driver: overlay
+    attachable: true
+
+volumes:
+  db_auth_data:
+  db_orders_data:

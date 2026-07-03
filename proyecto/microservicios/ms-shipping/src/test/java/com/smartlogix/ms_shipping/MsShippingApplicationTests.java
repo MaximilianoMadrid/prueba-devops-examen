@@ -1,0 +1,13 @@
+package com.smartlogix.ms_shipping;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+class MsShippingApplicationTests {
+
+	@Test
+	void contextLoads() {
+	}
+
+}
