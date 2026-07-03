@@ -1,5 +1,3 @@
-version: "3.9"
-
 # SmartLogix - Orquestación de microservicios (compatible con Docker Swarm)
 # Uso local:  docker compose up --build
 # Uso Swarm:  docker stack deploy -c docker-compose.yml smartlogix

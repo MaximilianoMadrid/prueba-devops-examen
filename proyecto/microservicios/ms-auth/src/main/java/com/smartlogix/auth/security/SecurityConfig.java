@@ -26,7 +26,8 @@ public class SecurityConfig {
                 "/error",
                 "/swagger-ui/**"
                 ,"/swagger-ui.html",
-                "/v3/api-docs/**").permitAll()
+                "/v3/api-docs/**",
+                "/actuator/**").permitAll()
                 // Cualquier otra petición en la aplicación pedirá estar autenticado
                 .anyRequest().authenticated()
             );
