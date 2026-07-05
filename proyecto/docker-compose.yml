@@ -1,10 +1,5 @@
 # SmartLogix - Orquestación local de microservicios (desarrollo)
 # Uso: docker compose up --build
-#
-# El despliegue en la nube (producción) NO usa este archivo: se orquesta con
-# Amazon ECS Fargate mediante las definiciones de tarea en infra/ecs/ y los
-# scripts en scripts/ecs-*.sh (ver README.md, sección "Despliegue en AWS").
-
 services:
 
   db-auth:
