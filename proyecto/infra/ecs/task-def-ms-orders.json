@@ -1,0 +1,43 @@
+{
+  "family": "smartlogix-ms-orders",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${EXECUTION_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "ms-orders",
+      "image": "${ECR_REGISTRY}/smartlogix/ms-orders:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        { "name": "ms-orders", "containerPort": 8082, "protocol": "tcp", "appProtocol": "http" }
+      ],
+      "environment": [
+        { "name": "SPRING_DATASOURCE_URL", "value": "jdbc:postgresql://db-orders.smartlogix.local:5432/orders_db" },
+        { "name": "SPRING_DATASOURCE_USERNAME", "value": "postgres" },
+        { "name": "AWS_REGION", "value": "${AWS_REGION}" }
+      ],
+      "secrets": [
+        { "name": "SPRING_DATASOURCE_PASSWORD", "valueFrom": "${DB_ORDERS_PASSWORD_ARN}" },
+        { "name": "JWT_SECRET", "valueFrom": "${JWT_SECRET_ARN}" }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget -qO- http://localhost:8082/actuator/health | grep UP || exit 1"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 5,
+        "startPeriod": 30
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/smartlogix/ms-orders",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

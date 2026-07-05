@@ -1,0 +1,34 @@
+{
+  "family": "smartlogix-db-auth",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${EXECUTION_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "db-auth",
+      "image": "postgres:16-alpine",
+      "essential": true,
+      "portMappings": [
+        { "name": "db-auth", "containerPort": 5432, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "POSTGRES_DB", "value": "auth_db" },
+        { "name": "POSTGRES_USER", "value": "postgres" }
+      ],
+      "secrets": [
+        { "name": "POSTGRES_PASSWORD", "valueFrom": "${DB_AUTH_PASSWORD_ARN}" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/smartlogix/db-auth",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

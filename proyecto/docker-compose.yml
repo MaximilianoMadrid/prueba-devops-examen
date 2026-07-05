@@ -1,6 +1,9 @@
-# SmartLogix - Orquestación de microservicios (compatible con Docker Swarm)
-# Uso local:  docker compose up --build
-# Uso Swarm:  docker stack deploy -c docker-compose.yml smartlogix
+# SmartLogix - Orquestación local de microservicios (desarrollo)
+# Uso: docker compose up --build
+#
+# El despliegue en la nube (producción) NO usa este archivo: se orquesta con
+# Amazon ECS Fargate mediante las definiciones de tarea en infra/ecs/ y los
+# scripts en scripts/ecs-*.sh (ver README.md, sección "Despliegue en AWS").
 
 services:
 
@@ -9,7 +12,7 @@ services:
     environment:
       POSTGRES_DB: auth_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "1234"
+      POSTGRES_PASSWORD: ${DB_AUTH_PASSWORD:-1234}
     volumes:
       - db_auth_data:/var/lib/postgresql/data
     networks:
@@ -19,17 +22,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
+    restart: on-failure
 
   db-orders:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: orders_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "1234"
+      POSTGRES_PASSWORD: ${DB_ORDERS_PASSWORD:-1234}
     volumes:
       - db_orders_data:/var/lib/postgresql/data
     networks:
@@ -39,10 +39,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
+    restart: on-failure
 
   ms-auth:
     image: ${DOCKERHUB_USER:-smartlogix}/ms-auth:${IMAGE_TAG:-latest}
@@ -51,7 +48,8 @@ services:
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db-auth:5432/auth_db
       SPRING_DATASOURCE_USERNAME: postgres
-      SPRING_DATASOURCE_PASSWORD: "1234"
+      SPRING_DATASOURCE_PASSWORD: ${DB_AUTH_PASSWORD:-1234}
+      JWT_SECRET: ${JWT_SECRET:-smartlogix-clave-super-secreta-para-secretear-2026}
     depends_on:
       db-auth:
         condition: service_healthy
@@ -63,14 +61,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    deploy:
-      replicas: 2
-      restart_policy:
-        condition: on-failure
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 512M
+    restart: on-failure
 
   ms-orders:
     image: ${DOCKERHUB_USER:-smartlogix}/ms-orders:${IMAGE_TAG:-latest}
@@ -79,7 +70,8 @@ services:
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db-orders:5432/orders_db
       SPRING_DATASOURCE_USERNAME: postgres
-      SPRING_DATASOURCE_PASSWORD: "1234"
+      SPRING_DATASOURCE_PASSWORD: ${DB_ORDERS_PASSWORD:-1234}
+      JWT_SECRET: ${JWT_SECRET:-smartlogix-clave-super-secreta-para-secretear-2026}
     depends_on:
       db-orders:
         condition: service_healthy
@@ -91,14 +83,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    deploy:
-      replicas: 2
-      restart_policy:
-        condition: on-failure
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 512M
+    restart: on-failure
 
   api-gateway:
     image: ${DOCKERHUB_USER:-smartlogix}/api-gateway:${IMAGE_TAG:-latest}
@@ -113,15 +98,32 @@ services:
         condition: service_healthy
     networks:
       - smartlogix-net
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep UP || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: on-failure
+
+  frontend:
+    image: ${DOCKERHUB_USER:-smartlogix}/frontend:${IMAGE_TAG:-latest}
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    networks:
+      - smartlogix-net
+    restart: on-failure
 
 networks:
   smartlogix-net:
-    driver: overlay
-    attachable: true
+    driver: bridge
 
 volumes:
   db_auth_data:

@@ -1,0 +1,30 @@
+{
+  "family": "smartlogix-frontend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${EXECUTION_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "frontend",
+      "image": "${ECR_REGISTRY}/smartlogix/frontend:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        { "name": "frontend", "containerPort": 3000, "protocol": "tcp", "appProtocol": "http" }
+      ],
+      "environment": [
+        { "name": "NEXT_PUBLIC_API_URL", "value": "${GATEWAY_PUBLIC_URL}" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/smartlogix/frontend",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "family": "smartlogix-ms-auth",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${EXECUTION_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "ms-auth",
+      "image": "${ECR_REGISTRY}/smartlogix/ms-auth:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        { "name": "ms-auth", "containerPort": 8081, "protocol": "tcp", "appProtocol": "http" }
+      ],
+      "environment": [
+        { "name": "SPRING_DATASOURCE_URL", "value": "jdbc:postgresql://db-auth.smartlogix.local:5432/auth_db" },
+        { "name": "SPRING_DATASOURCE_USERNAME", "value": "postgres" }
+      ],
+      "secrets": [
+        { "name": "SPRING_DATASOURCE_PASSWORD", "valueFrom": "${DB_AUTH_PASSWORD_ARN}" },
+        { "name": "JWT_SECRET", "valueFrom": "${JWT_SECRET_ARN}" }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep UP || exit 1"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 5,
+        "startPeriod": 30
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/smartlogix/ms-auth",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

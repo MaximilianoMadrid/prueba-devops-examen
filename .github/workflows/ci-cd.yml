@@ -1,4 +1,4 @@
-name: CI/CD - SmartLogix (auth, orders, gateway)
+name: CI/CD - SmartLogix (auth, orders, gateway, frontend)
 
 on:
   push:
@@ -7,23 +7,24 @@ on:
       - 'proyecto/microservicios/ms-auth/**'
       - 'proyecto/microservicios/ms-orders/**'
       - 'proyecto/api-gateway/**'
+      - 'proyecto/frontend/**'
       - 'proyecto/docker-compose.yml'
+      - 'proyecto/infra/ecs/**'
+      - 'proyecto/scripts/ecs-*.sh'
       - '.github/workflows/ci-cd.yml'
   workflow_dispatch: {}
 
 env:
-  DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
   IMAGE_TAG: ${{ github.sha }}
   AWS_REGION: us-east-1
 
 jobs:
 
-  # ---------- BUILD & TEST ----------
-  build-test:
+  # ---------- BUILD & TEST: microservicios Java ----------
+  build-test-java:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [ms-auth, ms-orders, api-gateway]
         include:
           - service: ms-auth
             path: proyecto/microservicios/ms-auth
@@ -45,9 +46,57 @@ jobs:
         working-directory: ${{ matrix.path }}
         run: mvn -B clean verify
 
-  # ---------- IMAGES: build + push a Docker Hub ----------
+  # ---------- BUILD & TEST: frontend ----------
+  build-test-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Habilitar pnpm
+        run: corepack enable
+
+      - name: Instalar dependencias
+        working-directory: proyecto/frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build de producción
+        working-directory: proyecto/frontend
+        run: pnpm build
+
+  # ---------- PROVISIÓN DE INFRAESTRUCTURA (ECR, cluster, logs, secretos, red) ----------
+  provision-infra:
+    needs: [build-test-java, build-test-frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS Academy
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Aprovisionar infraestructura (idempotente)
+        run: |
+          chmod +x proyecto/scripts/ecs-provision.sh
+          proyecto/scripts/ecs-provision.sh
+
+      - name: Guardar variables de infraestructura
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecs-runtime-env
+          path: proyecto/scripts/.ecs-runtime.env
+
+  # ---------- IMAGES: build + push a Amazon ECR ----------
   build-push-images:
-    needs: build-test
+    needs: provision-infra
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -58,14 +107,22 @@ jobs:
             path: proyecto/microservicios/ms-orders
           - service: api-gateway
             path: proyecto/api-gateway
+          - service: frontend
+            path: proyecto/frontend
     steps:
       - uses: actions/checkout@v4
 
-      - name: Login Docker Hub
-        uses: docker/login-action@v3
+      - name: Configurar credenciales AWS Academy
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login en Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build y push imagen - ${{ matrix.service }}
         uses: docker/build-push-action@v5
@@ -73,11 +130,11 @@ jobs:
           context: ${{ matrix.path }}
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service }}:${{ env.IMAGE_TAG }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service }}:latest
+            ${{ steps.ecr-login.outputs.registry }}/smartlogix/${{ matrix.service }}:${{ env.IMAGE_TAG }}
+            ${{ steps.ecr-login.outputs.registry }}/smartlogix/${{ matrix.service }}:latest
 
-  # ---------- PROVISIÓN DE RECURSOS CLOUD (IaC vía AWS CLI) ----------
-  provision-cloud:
+  # ---------- DEPLOY: registrar task definitions y crear/actualizar servicios ECS Fargate ----------
+  deploy-ecs:
     needs: build-push-images
     runs-on: ubuntu-latest
     steps:
@@ -91,37 +148,49 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Crear/asegurar cola SQS smartlogix-orders-queue
+      - name: Descargar variables de infraestructura
+        uses: actions/download-artifact@v4
+        with:
+          name: ecs-runtime-env
+          path: proyecto/scripts/
+
+      - name: Instalar gettext (envsubst)
+        run: sudo apt-get update -y && sudo apt-get install -y gettext-base
+
+      - name: Dar permisos a scripts
+        run: chmod +x proyecto/scripts/ecs-deploy-service.sh
+
+      # Orden importa: primero las bases de datos, luego los microservicios
+      # que dependen de ellas, y al final las puertas de entrada públicas.
+      - name: Deploy db-auth
+        working-directory: proyecto
+        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh db-auth db-auth 5432 false
+
+      - name: Deploy db-orders
+        working-directory: proyecto
+        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh db-orders db-orders 5432 false
+
+      - name: Deploy ms-auth
+        working-directory: proyecto
+        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh ms-auth ms-auth 8081 false
+
+      - name: Deploy ms-orders
+        working-directory: proyecto
+        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh ms-orders ms-orders 8082 false
+
+      - name: Deploy api-gateway
+        working-directory: proyecto
+        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh api-gateway api-gateway 8080 true
+
+      - name: Deploy frontend
+        working-directory: proyecto
+        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh frontend frontend 3000 true
+
+      - name: Mostrar servicios desplegados
         run: |
-          chmod +x proyecto/scripts/provision-sqs.sh
-          ./proyecto/scripts/provision-sqs.sh
-
-  # ---------- DEPLOY: docker stack deploy en el manager de Swarm (EC2) ----------
-  deploy-swarm:
-    needs: provision-cloud
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Copiar docker-compose.yml al manager Swarm
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SWARM_MANAGER_HOST }}
-          username: ${{ secrets.SWARM_MANAGER_USER }}
-          key: ${{ secrets.SWARM_MANAGER_SSH_KEY }}
-          source: "proyecto/docker-compose.yml"
-          target: "~/smartlogix/"
-          strip_components: 1
-
-      - name: Ejecutar docker stack deploy vía SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SWARM_MANAGER_HOST }}
-          username: ${{ secrets.SWARM_MANAGER_USER }}
-          key: ${{ secrets.SWARM_MANAGER_SSH_KEY }}
-          script: |
-            cd ~/smartlogix
-            export DOCKERHUB_USER=${{ secrets.DOCKERHUB_USERNAME }}
-            export IMAGE_TAG=${{ env.IMAGE_TAG }}
-            docker stack deploy -c docker-compose.yml smartlogix --with-registry-auth
-            docker stack services smartlogix
+          source proyecto/scripts/.ecs-runtime.env
+          aws ecs describe-services --cluster "$CLUSTER_NAME" \
+            --services db-auth db-orders ms-auth ms-orders api-gateway frontend \
+            --region "$AWS_REGION" \
+            --query 'services[].{name:serviceName,status:status,running:runningCount,desired:desiredCount}' \
+            --output table

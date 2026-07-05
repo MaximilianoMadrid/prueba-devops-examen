@@ -1,0 +1,38 @@
+{
+  "family": "smartlogix-api-gateway",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${EXECUTION_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "api-gateway",
+      "image": "${ECR_REGISTRY}/smartlogix/api-gateway:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        { "name": "api-gateway", "containerPort": 8080, "protocol": "tcp", "appProtocol": "http" }
+      ],
+      "environment": [
+        { "name": "MS_AUTH_URI", "value": "http://ms-auth.smartlogix.local:8081" },
+        { "name": "MS_ORDERS_URI", "value": "http://ms-orders.smartlogix.local:8082" }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep UP || exit 1"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 5,
+        "startPeriod": 30
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/smartlogix/api-gateway",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
