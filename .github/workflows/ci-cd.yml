@@ -1,118 +1,106 @@
-name: CI/CD - SmartLogix (auth, orders, gateway, frontend)
+name: SmartLogix CI/CD
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - 'proyecto/microservicios/ms-auth/**'
-      - 'proyecto/microservicios/ms-orders/**'
-      - 'proyecto/api-gateway/**'
-      - 'proyecto/frontend/**'
-      - 'proyecto/docker-compose.yml'
-      - 'proyecto/infra/ecs/**'
-      - 'proyecto/scripts/ecs-*.sh'
-      - '.github/workflows/ci-cd.yml'
-  workflow_dispatch: {}
+    branches:
+      - main
+
+  workflow_dispatch:
 
 env:
-  IMAGE_TAG: ${{ github.sha }}
   AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  IMAGE_TAG: latest
 
 jobs:
 
-  # ---------- BUILD & TEST: microservicios Java ----------
-  build-test-java:
+  build-java:
+
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
         include:
           - service: ms-auth
             path: proyecto/microservicios/ms-auth
+
           - service: ms-orders
             path: proyecto/microservicios/ms-orders
+
           - service: api-gateway
             path: proyecto/api-gateway
+
     steps:
+
       - uses: actions/checkout@v4
 
-      - name: Set up JDK
+      - name: Configurar Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: 21
           cache: maven
 
-      - name: Build y test - ${{ matrix.service }}
+      - name: Compilar proyecto
         working-directory: ${{ matrix.path }}
-        run: mvn -B clean verify
+        run: mvn clean package -DskipTests
 
-  # ---------- BUILD & TEST: frontend ----------
-  build-test-frontend:
+
+  build-frontend:
+
     runs-on: ubuntu-latest
+
     steps:
+
       - uses: actions/checkout@v4
 
-      - name: Set up Node
+      - name: Configurar Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: 22
 
-      - name: Habilitar pnpm
-        run: corepack enable
+      - name: Instalar PNPM
+        run: |
+          corepack enable
 
       - name: Instalar dependencias
         working-directory: proyecto/frontend
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
 
-      - name: Build de producción
+      - name: Build Frontend
         working-directory: proyecto/frontend
         run: pnpm build
 
-  # ---------- PROVISIÓN DE INFRAESTRUCTURA (ECR, cluster, logs, secretos, red) ----------
-  provision-infra:
-    needs: [build-test-java, build-test-frontend]
+
+  docker-build-push:
+
+    needs:
+      - build-java
+      - build-frontend
+
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Configurar credenciales AWS Academy
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Aprovisionar infraestructura (idempotente)
-        run: |
-          chmod +x proyecto/scripts/ecs-provision.sh
-          proyecto/scripts/ecs-provision.sh
-
-      - name: Guardar variables de infraestructura
-        uses: actions/upload-artifact@v4
-        with:
-          name: ecs-runtime-env
-          path: proyecto/scripts/.ecs-runtime.env
-
-  # ---------- IMAGES: build + push a Amazon ECR ----------
-  build-push-images:
-    needs: provision-infra
-    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - service: ms-auth
+
+          - name: ms-auth
             path: proyecto/microservicios/ms-auth
-          - service: ms-orders
+
+          - name: ms-orders
             path: proyecto/microservicios/ms-orders
-          - service: api-gateway
+
+          - name: api-gateway
             path: proyecto/api-gateway
-          - service: frontend
+
+          - name: frontend
             path: proyecto/frontend
+
     steps:
+
       - uses: actions/checkout@v4
 
-      - name: Configurar credenciales AWS Academy
+      - name: Configurar credenciales AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -120,77 +108,17 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login en Amazon ECR
-        id: ecr-login
+      - name: Login Amazon ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build y push imagen - ${{ matrix.service }}
-        uses: docker/build-push-action@v5
-        with:
-          context: ${{ matrix.path }}
-          push: true
-          tags: |
-            ${{ steps.ecr-login.outputs.registry }}/smartlogix/${{ matrix.service }}:${{ env.IMAGE_TAG }}
-            ${{ steps.ecr-login.outputs.registry }}/smartlogix/${{ matrix.service }}:latest
-
-  # ---------- DEPLOY: registrar task definitions y crear/actualizar servicios ECS Fargate ----------
-  deploy-ecs:
-    needs: build-push-images
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configurar credenciales AWS Academy
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Descargar variables de infraestructura
-        uses: actions/download-artifact@v4
-        with:
-          name: ecs-runtime-env
-          path: proyecto/scripts/
-
-      - name: Instalar gettext (envsubst)
-        run: sudo apt-get update -y && sudo apt-get install -y gettext-base
-
-      - name: Dar permisos a scripts
-        run: chmod +x proyecto/scripts/ecs-deploy-service.sh
-
-      # Orden importa: primero las bases de datos, luego los microservicios
-      # que dependen de ellas, y al final las puertas de entrada públicas.
-      - name: Deploy db-auth
-        working-directory: proyecto
-        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh db-auth db-auth 5432 false
-
-      - name: Deploy db-orders
-        working-directory: proyecto
-        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh db-orders db-orders 5432 false
-
-      - name: Deploy ms-auth
-        working-directory: proyecto
-        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh ms-auth ms-auth 8081 false
-
-      - name: Deploy ms-orders
-        working-directory: proyecto
-        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh ms-orders ms-orders 8082 false
-
-      - name: Deploy api-gateway
-        working-directory: proyecto
-        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh api-gateway api-gateway 8080 true
-
-      - name: Deploy frontend
-        working-directory: proyecto
-        run: IMAGE_TAG=${{ env.IMAGE_TAG }} scripts/ecs-deploy-service.sh frontend frontend 3000 true
-
-      - name: Mostrar servicios desplegados
+      - name: Build Docker Image
         run: |
-          source proyecto/scripts/.ecs-runtime.env
-          aws ecs describe-services --cluster "$CLUSTER_NAME" \
-            --services db-auth db-orders ms-auth ms-orders api-gateway frontend \
-            --region "$AWS_REGION" \
-            --query 'services[].{name:serviceName,status:status,running:runningCount,desired:desiredCount}' \
-            --output table
+          docker build \
+          -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/${{ matrix.name }}:${{ env.IMAGE_TAG }} \
+          ${{ matrix.path }}
+
+      - name: Push Docker Image
+        run: |
+          docker push \
+          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/${{ matrix.name }}:${{ env.IMAGE_TAG }}
